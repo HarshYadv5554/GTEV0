@@ -1,0 +1,13 @@
+[build]
+  command = "pnpm build"
+  publish = ".next"
+
+[dev]
+  command = "pnpm dev"
+  port = 3000
+
+[functions]
+  node_bundler = "esbuild"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
