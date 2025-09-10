@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server"
 
-function chunkText(text: string, maxChunkSize = 3000): string[] {
+function chunkText(text: string, maxChunkSize = 2000): string[] {
   const sentences = text.split(/[।.!?]+/).filter((sentence) => sentence.trim().length > 0)
   const chunks: string[] = []
   let currentChunk = ""
@@ -40,7 +40,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Text, from, and to parameters are required" }, { status: 400 })
     }
 
-    const isLongText = text.length > 4000
+    const isLongText = text.length > 3000
     console.log("[v0] Text is long:", isLongText, "- will use chunking if needed")
 
     const apiKey =
@@ -93,21 +93,34 @@ export async function POST(request: NextRequest) {
 
     if (isLongText) {
       console.log("[v0] Processing long text with chunking...")
-      const chunks = chunkText(text, 3000)
+      const chunks = chunkText(text, 2000)
       console.log("[v0] Split text into", chunks.length, "chunks")
 
       const translatedChunks: string[] = []
 
-      for (let i = 0; i < chunks.length; i++) {
-        console.log(`[v0] Translating chunk ${i + 1}/${chunks.length}, length: ${chunks[i].length}`)
+      const startTime = Date.now()
+      const maxProcessingTime = 25000 // 25 seconds to stay under deployment limits
 
-        const prompt = `You are translating Gurmukhi (Punjabi script) text to English. This is part ${i + 1} of ${chunks.length} from a YouTube video transcript. Please provide a natural, accurate English translation that maintains the original meaning and context.
+      const batchSize = Math.min(5, chunks.length) // Process max 5 chunks at a time
 
-Text to translate:
+      for (let batchStart = 0; batchStart < chunks.length; batchStart += batchSize) {
+        const currentTime = Date.now()
+        if (currentTime - startTime > maxProcessingTime) {
+          console.log("[v0] Approaching timeout limit, processing partial translation")
+          break
+        }
+
+        const batchEnd = Math.min(batchStart + batchSize, chunks.length)
+        const batchPromises = []
+
+        for (let i = batchStart; i < batchEnd; i++) {
+          console.log(`[v0] Translating chunk ${i + 1}/${chunks.length}, length: ${chunks[i].length}`)
+
+          const prompt = `Translate this Gurmukhi text to English (part ${i + 1}/${chunks.length}):
+
 ${chunks[i]}`
 
-        try {
-          const completion = await fetch("https://api.openai.com/v1/chat/completions", {
+          const chunkPromise = fetch("https://api.openai.com/v1/chat/completions", {
             method: "POST",
             headers: {
               Authorization: `Bearer ${apiKey}`,
@@ -119,54 +132,67 @@ ${chunks[i]}`
                 {
                   role: "system",
                   content:
-                    "You are a professional translator specializing in Gurmukhi (Punjabi) to English translation. You understand religious, cultural, and contextual nuances. Provide accurate, natural translations that preserve the meaning and context of the original text.",
+                    "You are a professional Gurmukhi to English translator. Provide accurate, natural translations.",
                 },
                 {
                   role: "user",
                   content: prompt,
                 },
               ],
-              max_tokens: 4000,
-              temperature: 0.3,
+              max_tokens: 3000,
+              temperature: 0.1,
             }),
+          }).then(async (completion) => {
+            if (!completion.ok) {
+              const errorData = await completion.json()
+              throw new Error(`Translation failed for chunk ${i + 1}: ${errorData.error?.message || "Unknown error"}`)
+            }
+
+            const completionData = await completion.json()
+            const translatedChunk = completionData.choices[0]?.message?.content?.trim()
+
+            if (!translatedChunk) {
+              throw new Error(`No translation received for chunk ${i + 1}`)
+            }
+
+            return { index: i, translation: translatedChunk }
           })
 
-          if (!completion.ok) {
-            const errorData = await completion.json()
-            console.error(`[v0] OpenAI API error for chunk ${i + 1}:`, errorData)
-            throw new Error(`Translation failed for chunk ${i + 1}: ${errorData.error?.message || "Unknown error"}`)
+          batchPromises.push(chunkPromise)
+        }
+
+        try {
+          const batchResults = await Promise.all(batchPromises)
+
+          for (const result of batchResults) {
+            translatedChunks[result.index] = result.translation
           }
 
-          const completionData = await completion.json()
-          const translatedChunk = completionData.choices[0]?.message?.content?.trim()
+          console.log(`[v0] Batch ${Math.floor(batchStart / batchSize) + 1} completed`)
 
-          if (!translatedChunk) {
-            throw new Error(`No translation received for chunk ${i + 1}`)
+          if (batchEnd < chunks.length) {
+            await new Promise((resolve) => setTimeout(resolve, 100))
           }
-
-          translatedChunks.push(translatedChunk)
-          console.log(`[v0] Chunk ${i + 1} translated successfully, length: ${translatedChunk.length}`)
-
-          if (i < chunks.length - 1) {
-            await new Promise((resolve) => setTimeout(resolve, 500))
-          }
-        } catch (chunkError) {
-          console.error(`[v0] Error translating chunk ${i + 1}:`, chunkError)
-          throw new Error(
-            `Failed to translate chunk ${i + 1}: ${chunkError instanceof Error ? chunkError.message : "Unknown error"}`,
-          )
+        } catch (batchError) {
+          console.error(`[v0] Error in batch processing:`, batchError)
+          break
         }
       }
 
-      const finalTranslation = translatedChunks.join(" ")
-      console.log("[v0] All chunks translated successfully, final length:", finalTranslation.length)
+      const completedChunks = translatedChunks.filter((chunk) => chunk && chunk.length > 0)
+      const finalTranslation = completedChunks.join(" ")
+
+      console.log("[v0] Translation completed:", completedChunks.length, "of", chunks.length, "chunks processed")
+      console.log("[v0] Final translation length:", finalTranslation.length)
 
       return NextResponse.json({
         translatedText: finalTranslation,
         originalText: text,
         fromLanguage: from,
         toLanguage: to,
-        chunksProcessed: chunks.length,
+        chunksProcessed: completedChunks.length,
+        totalChunks: chunks.length,
+        isPartial: completedChunks.length < chunks.length,
       })
     }
 
