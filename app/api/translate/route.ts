@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server"
 
-function chunkText(text: string, maxChunkSize = 6000): string[] {
+function chunkText(text: string, maxChunkSize = 3000): string[] {
   const sentences = text.split(/[।.!?]+/).filter((sentence) => sentence.trim().length > 0)
   const chunks: string[] = []
   let currentChunk = ""
@@ -28,77 +28,134 @@ export async function POST(request: NextRequest) {
   console.log("[v0] Translation API route called - starting execution")
 
   try {
+    console.log("[v0] Translation API called")
+
     const { text, from, to } = await request.json()
 
     console.log("[v0] Translation request received, text length:", text?.length)
     console.log("[v0] From:", from, "To:", to)
 
     if (!text || !from || !to) {
+      console.log("[v0] Missing required parameters")
       return NextResponse.json({ error: "Text, from, and to parameters are required" }, { status: 400 })
     }
 
     const isLongText = text.length > 4000
+    console.log("[v0] Text is long:", isLongText, "- will use chunking if needed")
 
     const apiKey =
       process.env.OPENAI_API_KEY ||
       "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"
 
-    if (!apiKey) {
+    if (!apiKey || apiKey === "your-openai-api-key-here") {
+      console.log("[v0] Invalid or missing OpenAI API key")
       return NextResponse.json({ error: "OpenAI API key not configured" }, { status: 500 })
     }
 
+    console.log("[v0] Using API key:", apiKey.substring(0, 20) + "...")
+
+    console.log("[v0] Testing OpenAI API key with direct fetch...")
+    try {
+      const testResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages: [{ role: "user", content: "Hello" }],
+          max_tokens: 5,
+        }),
+      })
+
+      if (!testResponse.ok) {
+        const errorData = await testResponse.json()
+        console.error("[v0] API key test failed:", errorData)
+        return NextResponse.json(
+          {
+            error: `OpenAI API key test failed: ${errorData.error?.message || "Unknown error"}`,
+          },
+          { status: testResponse.status },
+        )
+      }
+
+      console.log("[v0] API key test successful")
+    } catch (testError) {
+      console.error("[v0] API key test failed:", testError)
+      return NextResponse.json(
+        {
+          error: `OpenAI API connection failed: ${testError instanceof Error ? testError.message : "Unknown error"}`,
+        },
+        { status: 500 },
+      )
+    }
+
     if (isLongText) {
-      const chunks = chunkText(text, 6000)
+      console.log("[v0] Processing long text with chunking...")
+      const chunks = chunkText(text, 3000)
       console.log("[v0] Split text into", chunks.length, "chunks")
 
-      const translatedChunks: string[] = new Array(chunks.length)
-      const BATCH_SIZE = 5
+      const translatedChunks: string[] = []
 
-      for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
-        const batch = chunks.slice(i, i + BATCH_SIZE)
-        console.log(`[v0] Translating batch ${i / BATCH_SIZE + 1}/${Math.ceil(chunks.length / BATCH_SIZE)} of size ${batch.length}`)
+      for (let i = 0; i < chunks.length; i++) {
+        console.log(`[v0] Translating chunk ${i + 1}/${chunks.length}, length: ${chunks[i].length}`)
 
-        await Promise.all(
-          batch.map(async (chunk, idx) => {
-            const absoluteIndex = i + idx
-            const prompt = `You are translating Gurmukhi (Punjabi script) text to English. This is part ${absoluteIndex + 1} of ${chunks.length} from a YouTube video transcript. Provide a natural, accurate English translation that maintains the original meaning and context.\n\nText to translate:\n${chunk}`
+        const prompt = `You are translating Gurmukhi (Punjabi script) text to English. This is part ${i + 1} of ${chunks.length} from a YouTube video transcript. Please provide a natural, accurate English translation that maintains the original meaning and context.
 
-            const completion = await fetch("https://api.openai.com/v1/chat/completions", {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${apiKey}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                model: "gpt-4o-mini",
-                messages: [
-                  {
-                    role: "system",
-                    content:
-                      "You are a professional translator specializing in Gurmukhi (Punjabi) to English translation. You understand religious, cultural, and contextual nuances. Provide accurate, natural translations that preserve the meaning and context of the original text.",
-                  },
-                  {
-                    role: "user",
-                    content: prompt,
-                  },
-                ],
-                max_tokens: 2000,
-                temperature: 0.3,
-              }),
-            })
+Text to translate:
+${chunks[i]}`
 
-            if (!completion.ok) {
-              const errorText = await completion.text()
-              throw new Error(`Translation failed for chunk ${absoluteIndex + 1}: ${errorText}`)
-            }
+        try {
+          const completion = await fetch("https://api.openai.com/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              model: "gpt-4o-mini",
+              messages: [
+                {
+                  role: "system",
+                  content:
+                    "You are a professional translator specializing in Gurmukhi (Punjabi) to English translation. You understand religious, cultural, and contextual nuances. Provide accurate, natural translations that preserve the meaning and context of the original text.",
+                },
+                {
+                  role: "user",
+                  content: prompt,
+                },
+              ],
+              max_tokens: 4000,
+              temperature: 0.3,
+            }),
+          })
 
-            const completionData = await completion.json()
-            const translatedChunk = completionData.choices[0]?.message?.content?.trim()
-            if (!translatedChunk) throw new Error(`No translation received for chunk ${absoluteIndex + 1}`)
+          if (!completion.ok) {
+            const errorData = await completion.json()
+            console.error(`[v0] OpenAI API error for chunk ${i + 1}:`, errorData)
+            throw new Error(`Translation failed for chunk ${i + 1}: ${errorData.error?.message || "Unknown error"}`)
+          }
 
-            translatedChunks[absoluteIndex] = translatedChunk
-          }),
-        )
+          const completionData = await completion.json()
+          const translatedChunk = completionData.choices[0]?.message?.content?.trim()
+
+          if (!translatedChunk) {
+            throw new Error(`No translation received for chunk ${i + 1}`)
+          }
+
+          translatedChunks.push(translatedChunk)
+          console.log(`[v0] Chunk ${i + 1} translated successfully, length: ${translatedChunk.length}`)
+
+          if (i < chunks.length - 1) {
+            await new Promise((resolve) => setTimeout(resolve, 500))
+          }
+        } catch (chunkError) {
+          console.error(`[v0] Error translating chunk ${i + 1}:`, chunkError)
+          throw new Error(
+            `Failed to translate chunk ${i + 1}: ${chunkError instanceof Error ? chunkError.message : "Unknown error"}`,
+          )
+        }
       }
 
       const finalTranslation = translatedChunks.join(" ")
@@ -113,7 +170,10 @@ export async function POST(request: NextRequest) {
       })
     }
 
-    const prompt = `You are translating Gurmukhi (Punjabi script) text to English. The text is from a YouTube video transcript. Please provide a natural, accurate English translation that maintains the original meaning and context.\n\nText to translate:\n${text}`
+    const prompt = `You are translating Gurmukhi (Punjabi script) text to English. The text is from a YouTube video transcript. Please provide a natural, accurate English translation that maintains the original meaning and context.
+
+Text to translate:
+${text}`
 
     console.log("[v0] Sending request to OpenAI with model gpt-4o-mini...")
 
@@ -137,7 +197,7 @@ export async function POST(request: NextRequest) {
               content: prompt,
             },
           ],
-          max_tokens: 2000,
+          max_tokens: 4000,
           temperature: 0.3,
         }),
       })
@@ -170,6 +230,7 @@ export async function POST(request: NextRequest) {
       const translatedText = completionData.choices[0]?.message?.content?.trim()
 
       if (!translatedText) {
+        console.log("[v0] No translation received from OpenAI")
         throw new Error("No translation received from OpenAI")
       }
 
@@ -187,6 +248,7 @@ export async function POST(request: NextRequest) {
       let errorMessage = "OpenAI API error"
 
       if (openaiError instanceof Error) {
+        console.log("[v0] OpenAI error message:", openaiError.message)
         errorMessage = `OpenAI API error: ${openaiError.message}`
       }
 
@@ -198,8 +260,11 @@ export async function POST(request: NextRequest) {
     let errorMessage = "Translation failed. Please try again."
 
     if (error instanceof Error) {
+      console.log("[v0] Error message:", error.message)
       errorMessage = `Translation error: ${error.message}`
     }
+
+    console.log("[v0] Returning error response:", errorMessage)
 
     return NextResponse.json(
       {
